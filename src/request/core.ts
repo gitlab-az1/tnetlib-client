@@ -2,10 +2,21 @@ import HttpResponse from "../response";
 import FetchAdapter from "./adapters/fetch";
 import InterceptorChain from "../interceptor";
 import XMLHttpRequestAdapter from "./adapters/xhr";
-import { Disposable } from "../@internals/disposable";
+import WeakEmitter from "../@internals/weak-emitter";
 import { type AdapterBuilder } from "./adapters/_defs";
 import { Cookie, type ICookie, isCookie } from "../defs";
 import { Exception, onUnexpected } from "../@internals/errors";
+import { parseMultipart, UniversalFormData } from "../form-data";
+import { BinaryWriter, chunkToBuffer } from "../@internals/binary-protocol";
+import TransportKeyObject, { TRANSPORT_STRATEGY } from "../transport/key-object";
+import { Disposable, DisposableStore, IDisposable } from "../@internals/disposable";
+
+import {
+  getDefaultMask,
+  isSecurePacket,
+  Transporter,
+  unwrapPacket,
+} from "../transport/core";
 
 import {
   CancellationTokenSource,
@@ -14,20 +25,33 @@ import {
 
 import {
   assert,
+  concatBuffers,
   exclude,
   isAsyncIterable,
   isIterable,
   isPlainObject,
+  NEVER,
+  timestamp,
 } from "../@internals/util";
 
 import type {
   BufferLike,
   CommonHttpHeaders,
+  EventCallback,
   HttpHeaders,
   HttpMethod,
   LooseAutocomplete,
 } from "../@internals/_types";
 
+
+export interface RequestDefaultEventsMap {
+  progress: [event: ProgressEvent<XMLHttpRequestEventTarget>];
+  error: [error: Error];
+  readystatechange: [request: HttpRequest];
+  data: [chunk: Uint8Array];
+  dispose: [never];
+  done: [response: HttpResponse];
+}
 
 export const enum REQUEST_STATE {
   UNINITIALIZED = 0x0,
@@ -41,7 +65,7 @@ export const enum REQUEST_STATE {
 export interface RequestInit {
   url?: string | URL;
   method?: HttpMethod;
-  headers?: HttpHeaders;
+  headers?: HttpHeaders | Headers;
   credentials?: RequestCredentials;
   keepAlive?: boolean;
   mode?: RequestMode;
@@ -49,19 +73,26 @@ export interface RequestInit {
   redirect?: RequestRedirect;
   signal?: AbortSignal;
   cache?: RequestCache;
+  maskBytes?: number | Uint8Array;
   errorHandler?: (err: Error) => unknown,
   secureTransportKey?: BufferLike;
-  body?: XMLHttpRequestBodyInit | ReadableStream<Uint8Array>;
+  transportStrategy?: TRANSPORT_STRATEGY;
+  body?: XMLHttpRequestBodyInit | ReadableStream<Uint8Array> | FormData;
   token?: ICancellationToken;
   timeout?: number;
+  allowEventProfilingMonitoring?: boolean;
+  supressWarnings?: boolean;
 }
 
 export class HttpRequest extends Disposable.Disposable {
   #headers: Headers;
   #state: REQUEST_STATE;
   #extendedCookies: Set<Cookie>;
+  #bodyWriter?: BinaryWriter | null;
   #source: CancellationTokenSource;
+  #transportKey?: TransportKeyObject;
   readonly #Adapter: AdapterBuilder;
+  readonly #emitter: WeakEmitter<RequestDefaultEventsMap>;
   readonly #interceptors: [InterceptorChain<HttpRequest>, InterceptorChain<HttpResponse>];
 
   public constructor(
@@ -74,6 +105,7 @@ export class HttpRequest extends Disposable.Disposable {
 
     super();
 
+    this.#bodyWriter = null;
     this.#headers = new Headers();
     this.#extendedCookies = new Set();
     this.#source = new CancellationTokenSource(_options.token);
@@ -81,7 +113,7 @@ export class HttpRequest extends Disposable.Disposable {
     this.#Adapter = adapter !== "xhr" ?
       (url, options) => new FetchAdapter(url, options) :
       XMLHttpRequestAdapter.secureConstructor;
-
+    
     this.#interceptors = [
       new InterceptorChain(),
       new InterceptorChain(),
@@ -91,7 +123,17 @@ export class HttpRequest extends Disposable.Disposable {
       this.#source.cancel();
     });
 
-    if(typeof _options.headers === "object" && isPlainObject(_options.headers)) {
+    this.#emitter = new WeakEmitter({
+      leakWarningThreshold: 14,
+      onListenerError: _options.errorHandler,
+      _profName: _options.allowEventProfilingMonitoring ? "HttpRequest" : void 0,
+    });
+
+    if(_options.headers instanceof Headers) {
+      for(const [key, value] of _options.headers.entries()) {
+        this.#headers.append(key, value);
+      }
+    } else if(typeof _options.headers === "object" && isPlainObject(_options.headers)) {
       for(const prop in _options.headers) {
         if(!Object.prototype.hasOwnProperty.call(_options.headers, prop))
           continue;
@@ -101,14 +143,18 @@ export class HttpRequest extends Disposable.Disposable {
           this.#headers.append(prop, value);
         }
       }
-    } else if(_options.headers instanceof Headers) {
-      for(const [key, value] of _options.headers.entries()) {
-        this.#headers.append(key, value);
-      }
     }
 
     // eslint-disable-next-line no-extra-boolean-cast
     this.#state = !!_options.url ? REQUEST_STATE.READY : REQUEST_STATE.UNINITIALIZED;
+
+    if(this.#state === REQUEST_STATE.READY) {
+      this.#emitter.emit("readystatechange", this);
+    }
+
+    if(!this.#source.token.isCancellationRequested && _options.secureTransportKey) {
+      this.#transportKey = new TransportKeyObject(_options.secureTransportKey, _options.transportStrategy);
+    }
   }
 
   public get interceptors(): { readonly request: InterceptorChain<HttpRequest>, readonly response: InterceptorChain<HttpResponse> } {
@@ -122,6 +168,17 @@ export class HttpRequest extends Disposable.Disposable {
 
   public get readyState(): number {
     return this.#state;
+  }
+
+  public getMaskBytes(): Uint8Array | number | null {
+    return this._options.maskBytes ?? null;
+  }
+
+  public setMaskBytes(value: Uint8Array | number): this {
+    this.#ensureNotDisposed();
+
+    this._options.maskBytes = value;
+    return this;
   }
 
   public getURL(): URL | null {
@@ -139,9 +196,48 @@ export class HttpRequest extends Disposable.Disposable {
 
     if(this.#state === REQUEST_STATE.UNINITIALIZED) {
       this.#state = REQUEST_STATE.READY;
+      this.#emitter.emit("readystatechange", this);
     }
 
     return this;
+  }
+
+  public setBody(body?: RequestInit["body"] | null): this {
+    this.#ensureNotDisposed();
+    this._options.body = body ?? void 0;
+
+    return this;
+  }
+
+  /**
+   * Creates a chunked stream that will accept chunks by this#write()
+   * 
+   * ATTENTION: IF YOU CREATE A WRITER IT WILL OVERRIDE BODY
+   */
+  public createBodyWriter(): this {
+    this.#ensureNotDisposed();
+
+    if(!this.#bodyWriter) {
+      this.#bodyWriter = new BinaryWriter();
+      this.#headers.set("Content-Type", "application/octet-stream");
+    }
+
+    return this;
+  }
+
+  public write(chunk: BufferLike): boolean {
+    this.#ensureNotDisposed();
+    
+    if(this.#bodyWriter) {
+      this.#bodyWriter.write(chunk);
+      this.#emitter.emit("data", chunkToBuffer(chunk));
+
+      return true;
+    } else if(this._options.supressWarnings !== true) {
+      console.warn("[HttpRequest] Before use write() method you must call createBodyWriter()");
+    }
+    
+    return false;
   }
 
   public getMethod(): HttpMethod {
@@ -171,6 +267,30 @@ export class HttpRequest extends Disposable.Disposable {
     this.#ensureNotDisposed();
 
     this.#headers.delete(key as string);
+    return this;
+  }
+
+  public setTransportKey(key: BufferLike): this {
+    this.#ensureNotDisposed();
+    
+    this.#transportKey?.dispose();
+    this.#transportKey = new TransportKeyObject(key);
+
+    return this;
+  }
+
+  public getTimeout(): number | null {
+    this.#ensureNotDisposed();
+    return this._options.timeout ?? null;
+  }
+
+  public setTimeout(value: number): this {
+    this.#ensureNotDisposed();
+
+    if(typeof value === "number" && value > 0) {
+      this._options.timeout = value | 0;
+    }
+
     return this;
   }
 
@@ -227,10 +347,73 @@ export class HttpRequest extends Disposable.Disposable {
     return delIndex > -1;
   }
 
-  public async dispatch(): Promise<HttpResponse> {
+  public on<K extends keyof RequestDefaultEventsMap>(
+    name: LooseAutocomplete<K>,
+    callback: EventCallback<RequestDefaultEventsMap[K]>,
+    thisArg?: any,
+    options?: {
+      toDisposeWithEvent?: IDisposable[];
+      disposables?: IDisposable[] | DisposableStore
+    } // eslint-disable-line comma-dangle
+  ): IDisposable {
+    if(this.#state === REQUEST_STATE.DISPOSED)
+      return Disposable.None;
+
+    return this.#emitter.addListener(name, callback, thisArg, {
+      once: false,
+      disposables: options?.disposables,
+      toDisposeWithEvent: options?.toDisposeWithEvent,
+    });
+  }
+
+  public once<K extends keyof RequestDefaultEventsMap>(
+    name: LooseAutocomplete<K>,
+    callback: EventCallback<RequestDefaultEventsMap[K]>,
+    thisArg?: any,
+    options?: {
+      toDisposeWithEvent?: IDisposable[];
+      disposables?: IDisposable[] | DisposableStore
+    } // eslint-disable-line comma-dangle
+  ): IDisposable {
+    if(this.#state === REQUEST_STATE.DISPOSED)
+      return Disposable.None;
+
+    return this.#emitter.addListener(name, callback, thisArg, {
+      once: true,
+      disposables: options?.disposables,
+      toDisposeWithEvent: options?.toDisposeWithEvent,
+    });
+  }
+
+  public off<K extends keyof RequestDefaultEventsMap>(
+    name: LooseAutocomplete<K>,
+    callback: EventCallback<RequestDefaultEventsMap[K]> // eslint-disable-line comma-dangle
+  ): boolean {
+    if(this.#state === REQUEST_STATE.DISPOSED)
+      return false;
+
+    return this.#emitter.removeListener(name, callback);
+  }
+
+  public removeListener(name: LooseAutocomplete<keyof RequestDefaultEventsMap>): boolean {
+    if(this.#state === REQUEST_STATE.DISPOSED) 
+      return false;
+
+    return this.#emitter.removeListener(name);
+  }
+
+  /**
+   * Dispatch the request to target server.
+   * 
+   * @param t A optional `Transporter` object with body payload, if provided will override body
+   * @returns A `HttpResponse` object 
+   */
+  public async dispatch(t?: Transporter): Promise<HttpResponse> {
     const errorHandler = this._options.errorHandler && typeof this._options.errorHandler === "function" ?
       this._options.errorHandler :
       onUnexpected;
+
+    const st: number = timestamp();
 
     try {
       this.#ensureNotDisposed();
@@ -240,7 +423,7 @@ export class HttpRequest extends Disposable.Disposable {
       }
     
       if(this.#state !== REQUEST_STATE.READY) {
-        throw new Exception("This HttpRequest is not more ready to be dispatched");
+        throw new Exception("This HttpRequest is not ready to be dispatched");
       }
 
       assert(this._options.url, "A URL object must be defined to dispatch a network request");
@@ -261,27 +444,53 @@ export class HttpRequest extends Disposable.Disposable {
       }
 
     
-      if(this._options.body) {
-        let body = null;
+      if(t instanceof Transporter) {
+        this._options.body = await t.return();
+        
+        this.#headers.set("Content-Type", "application/octet-stream");
+        this.#headers.set("Content-Length", this._options.body.byteLength.toString());
+      } else if(this.#bodyWriter) {
+        this._options.body = this.#bodyWriter.drain();
+        this.#headers.set("Content-Length", this._options.body.byteLength.toString());
+      } else if(
+        this._options.body instanceof UniversalFormData ||
+        (typeof globalThis.FormData !== "undefined" ?
+          this._options.body instanceof globalThis.FormData :
+          false
+        )
+      ) {
+        if(this._options.body instanceof UniversalFormData) {
+          const { body, headers } = parseMultipart(this._options.body);
 
-        if(isIterable(this._options.body) || isAsyncIterable(this._options.body)) {
-          const chunks: Uint8Array[] = [];
-          let len: number = 0;
+          let lastKey: string | undefined;
 
-          for await (const chunk of (this._options.body as unknown as IterableIterator<Uint8Array>)) {
-            chunks.push(chunk);
-            len += chunk.length;
-          }
+          for(const prop in headers) {
+            const h = headers[prop];
 
-          body = new Uint8Array(len);
-          let offset: number = 0;
+            for(const value of Array.isArray(h) ? h : [h]) {
+              this.#headers[lastKey === prop ? "append" : "set"](prop, value);
+              lastKey = prop;
+            }
 
-          for(let i = 0; i < chunks.length; i++) {
-            body.set(chunks[i], offset);
-            offset += chunks[i].length;
+            lastKey = void 0;
           }
 
           this._options.body = body;
+        } else {
+          this.#headers.set("Content-Type", "multipart/form-data");
+        }
+      } else if(this._options.body) {
+        if(isIterable(this._options.body) || isAsyncIterable(this._options.body)) {
+          const chunks: Uint8Array[] = [];
+        
+          for await (const chunk of (this._options.body as unknown as IterableIterator<Uint8Array>)) {
+            chunks.push(chunk);
+          }
+
+          this._options.body = concatBuffers(...chunks);
+
+          this.#headers.set("Content-Type", "application/octet-stream");
+          this.#headers.set("Content-Length", this._options.body.byteLength.toString());
         }
       }
 
@@ -289,7 +498,18 @@ export class HttpRequest extends Disposable.Disposable {
         throw new Exception("Asynchronous network request was cancelled by token", "ERR_TOKEN_CANCELLED");
       }
 
-      // TODO: if(this.#transportKey && this._options.body is Buffer) {...}
+      if(this.#transportKey && !t && this._options.body) {
+        const transporter = new Transporter(this.#transportKey);
+
+        if(this._options.maskBytes) {
+          transporter.setMaskBytes(this._options.maskBytes);
+        }
+
+        this._options.body = await transporter.setPayload(this._options.body)
+          .return();
+
+        transporter.dispose();
+      }
 
       // eslint-disable-next-line @typescript-eslint/no-this-alias
       let req = this as HttpRequest;
@@ -300,7 +520,7 @@ export class HttpRequest extends Disposable.Disposable {
       }
 
       assert(req._options.url, "A URL object must be defined to dispatch a network request");
-
+      
       const adapter = this.#Adapter(req._options.url, {
         headers,
         signal: ac.signal,
@@ -314,26 +534,48 @@ export class HttpRequest extends Disposable.Disposable {
         priority: req._options.priority,
         redirect: req._options.redirect,
         timeout: req._options.timeout,
+        onProgress: (e: any) => {
+          this.#emitter.emit("progress", e);
+        },
       } as any);
-
+      
       super._register(adapter);
+
       const rawResponse = await adapter.dispatch();
 
       if((rawResponse.status / 100 | 0) === 3 && adapter instanceof XMLHttpRequestAdapter) {
-        // TODO: handle redirect polices
+        const location = rawResponse.headers.get("Location");
+
+        if(location && this._options.redirect !== "manual") {
+          if(this._options.redirect === "error") {
+            throw new Exception("Redirect not allowed by redirect policy", "ERR_REDIRECT_BLOCKED");
+          }
+
+          this.setURL(new URL(location, this.getURL()!));
+          return await this.dispatch();
+        }
       }
 
-      const buffer = await rawResponse.arrayBuffer();
+      let buffer = await rawResponse.arrayBuffer();
 
-      // if(this.#transportKey) {...}
+      if(this.#transportKey && isSecurePacket(buffer)) {
+        buffer = await unwrapPacket(
+          buffer,
+          this.#transportKey,
+          this._options.maskBytes ?? getDefaultMask() // eslint-disable-line comma-dangle
+        );
+      }
 
       if(this.#source.token.isCancellationRequested) {
         throw new Exception("Asynchronous network request was cancelled by token", "ERR_TOKEN_CANCELLED");
       }
 
       let response = new HttpResponse(buffer, {
+        url: this._options.url,
         headers: rawResponse.headers,
+        statusText: rawResponse.statusText,
         status: rawResponse.status,
+        responseTime: timestamp() - st,
       });
 
       response = await this.#interceptors[1].fulfilled(response);
@@ -342,8 +584,11 @@ export class HttpRequest extends Disposable.Disposable {
         throw new Exception("Asynchronous network request was cancelled by token", "ERR_TOKEN_CANCELLED");
       }
 
+      this.#emitter.emit("done", response);
       return response;
     } catch (err: any) {
+      this.#emitter.emit("error", err);
+
       errorHandler(err);
       this.#state = REQUEST_STATE.ERROR;
 
@@ -354,11 +599,14 @@ export class HttpRequest extends Disposable.Disposable {
   public dispose(): void {
     if(this.#state !== REQUEST_STATE.DISPOSED) {
       this.#state = REQUEST_STATE.DISPOSED;
+      this.#emitter.emit("dispose", NEVER);
 
       this.#extendedCookies.clear();
       this.#headers = null!;
       this.#interceptors[0] = null!;
       this.#interceptors[1] = null!;
+      this.#emitter.dispose();
+      this.#bodyWriter?.drain();
     }
 
     super.dispose();

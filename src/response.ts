@@ -2,8 +2,39 @@ import { type ICookie } from "./defs";
 import type { HttpHeaders, Mutable } from "./@internals/_types";
 
 
+export interface ResponseOptions extends ResponseInit {
+  url?: string | URL;
+  redirected?: boolean;
+  responseTime?: number;
+}
+
 class HttpResponse extends Response {
+  private _isRedirected: boolean | null;
   private _headersCache: HttpHeaders | null | undefined;
+
+  public constructor(body?: BodyInit | null, private readonly _init?: ResponseOptions) {
+    super(body, _init);
+    this._isRedirected = typeof _init?.redirected === "boolean" ? _init.redirected : null;
+  }
+
+  public override get redirected(): boolean {
+    if(this._isRedirected != null)
+      return this._isRedirected;
+
+    return super.redirected;
+  }
+
+  public get responseTime(): number | null {
+    return this._init?.responseTime ?? null;
+  }
+
+  public override get url(): string {
+    return this._init?.url ? new URL(this._init.url).toString() : "";
+  }
+
+  public override get ok(): boolean {
+    return (this.status / 100 | 0) === 2;
+  }
 
   public getHeaders(): HttpHeaders {
     if(!this._headersCache) {

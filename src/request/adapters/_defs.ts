@@ -11,6 +11,7 @@ export abstract class NetworkRequestAdapter extends Disposable.Disposable {
     protected readonly _options?: Omit<RequestInit, "headers"> & {
       timeout?: number;
       auth?: [string, string];
+      onProgress?: (event: ProgressEvent<XMLHttpRequestEventTarget>) => unknown;
       headers?: Record<string, string | string[]> | Headers;
     } // eslint-disable-line comma-dangle
   ) { super(); }
@@ -42,6 +43,7 @@ export interface AdapterConstructor {
   new (url: string | URL, options?: Omit<RequestInit, "headers"> & {
     timeout?: number;
     auth?: [string, string];
+    onProgress?: (event: ProgressEvent<XMLHttpRequestEventTarget>) => unknown;
     headers?: Record<string, string | string[]> | Headers;
   }): NetworkRequestAdapter;
 }
@@ -49,5 +51,6 @@ export interface AdapterConstructor {
 export type AdapterBuilder = (url: string | URL, options?: Omit<RequestInit, "headers"> & {
   timeout?: number;
   auth?: [string, string];
+  onProgress?: (event: ProgressEvent<XMLHttpRequestEventTarget>) => unknown;
   headers?: Record<string, string | string[]> | Headers;
 }) => NetworkRequestAdapter;

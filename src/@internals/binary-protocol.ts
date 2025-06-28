@@ -111,6 +111,17 @@ export class BinaryReader implements IReader<Uint8Array> {
     return chunk;
   }
 
+  public seek(length?: number, offset?: number): Uint8Array {
+    if(typeof length !== "number" || length < 0) {
+      length = this.#data.length;
+    }
+
+    return this.#data.slice(
+      typeof offset === "number" && offset >= 0 ? offset | 0 : 0,
+      Math.min(length | 0, this.#data.length) // eslint-disable-line comma-dangle
+    );
+  }
+
   public dispose(): void {
     this.#data = null!;
     
@@ -142,28 +153,26 @@ export function chunkToBuffer(input: BufferLike): Uint8Array {
 }
 
 
-export const enum SerializableDataType {
-  Null = 0,
-  String = 1,
-  Uint = 2,
-  Object = 3,
-  Array = 4,
-  MarshallObject = 5,
-  Buffer = 6,
+export const enum SERIALIZABLE_DATA_TYPE {
+  NULL = 0,
+  STRING = 1,
+  UINT = 2,
+  OBJECT = 3,
+  ARRAY = 4,
+  BUFFER = 5,
 }
 
 function createOneByteArray(value: number): Uint8Array {
   return Uint8Array.of(value);
 }
 
-const TypePresets: { readonly [K in keyof typeof SerializableDataType]: Uint8Array } = {
-  Null: createOneByteArray(SerializableDataType.Null),
-  String: createOneByteArray(SerializableDataType.String),
-  Buffer: createOneByteArray(SerializableDataType.Buffer),
-  Array: createOneByteArray(SerializableDataType.Array),
-  Object: createOneByteArray(SerializableDataType.Object),
-  Uint: createOneByteArray(SerializableDataType.Uint),
-  MarshallObject: createOneByteArray(SerializableDataType.MarshallObject),
+const TypePresets: { readonly [K in keyof typeof SERIALIZABLE_DATA_TYPE]: Uint8Array } = {
+  NULL: createOneByteArray(SERIALIZABLE_DATA_TYPE.NULL),
+  STRING: createOneByteArray(SERIALIZABLE_DATA_TYPE.STRING),
+  BUFFER: createOneByteArray(SERIALIZABLE_DATA_TYPE.BUFFER),
+  ARRAY: createOneByteArray(SERIALIZABLE_DATA_TYPE.ARRAY),
+  OBJECT: createOneByteArray(SERIALIZABLE_DATA_TYPE.OBJECT),
+  UINT: createOneByteArray(SERIALIZABLE_DATA_TYPE.UINT),
 };
 
 
@@ -209,22 +218,22 @@ export function writeInt32VQL(writer: IWriter, value: number): void {
 
 export function serialize(writer: IWriter, data: unknown): void {
   if(data === null || typeof data === "undefined") {
-    writer.write(TypePresets.Null);
+    writer.write(TypePresets.NULL);
   } else if(typeof data === "string") {
     const buffer = getEncoder().encode(data);
 
-    writer.write(TypePresets.String);
+    writer.write(TypePresets.STRING);
     writeInt32VQL(writer, buffer.length);
     writer.write(buffer);
   } else if(data instanceof Uint8Array) {
-    writer.write(TypePresets.Buffer);
+    writer.write(TypePresets.BUFFER);
     writeInt32VQL(writer, data.length);
     writer.write(data);
   } else if(typeof data === "number" && Number.isInteger(data)) {
-    writer.write(TypePresets.Uint);
+    writer.write(TypePresets.UINT);
     writeInt32VQL(writer, data);
   } else if(Array.isArray(data)) {
-    writer.write(TypePresets.Array);
+    writer.write(TypePresets.ARRAY);
     writeInt32VQL(writer, data.length);
 
     for(let i = 0; i < data.length; i++) {
@@ -239,7 +248,7 @@ export function serialize(writer: IWriter, data: unknown): void {
 
     const buffer = getEncoder().encode(json.value);
 
-    writer.write(TypePresets.Object);
+    writer.write(TypePresets.OBJECT);
     writeInt32VQL(writer, buffer.length);
     writer.write(buffer);
   }
@@ -249,19 +258,19 @@ export function deserialize<T = any>(reader: IReader): T {
   const type = reader.read(1)[0];
 
   switch(type) {
-    case SerializableDataType.Null:
+    case SERIALIZABLE_DATA_TYPE.NULL:
       return null as T;
-    case SerializableDataType.String: {
+    case SERIALIZABLE_DATA_TYPE.STRING: {
       const len = readIntVQL(reader);
       return new TextDecoder().decode(reader.read(len)) as T;
     } break;
-    case SerializableDataType.Uint:
+    case SERIALIZABLE_DATA_TYPE.UINT:
       return readIntVQL(reader) as T;
-    case SerializableDataType.Buffer: {
+    case SERIALIZABLE_DATA_TYPE.BUFFER: {
       const len = readIntVQL(reader);
       return reader.read(len) as T;
     } break;
-    case SerializableDataType.Array: {
+    case SERIALIZABLE_DATA_TYPE.ARRAY: {
       const len = readIntVQL(reader);
       const result = [];
 
@@ -271,7 +280,7 @@ export function deserialize<T = any>(reader: IReader): T {
 
       return result as T;
     } break;
-    case SerializableDataType.Object: {
+    case SERIALIZABLE_DATA_TYPE.OBJECT: {
       const len = readIntVQL(reader);
       const json = getDecoder().decode(reader.read(len));
       const parsed = jsonSafeParser<T>(json);

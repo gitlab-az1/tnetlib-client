@@ -1,6 +1,9 @@
 import { Exception } from "./errors";
 
 
+export const NEVER = void 0 as never;
+
+
 export function exclude<T extends object, K extends keyof T>(obj: T, ...keys: K[]): Omit<T, K> {
   return Object.fromEntries( Object.entries(obj).filter(([key]) => !keys.includes(key as K)) ) as Omit<T, K>;
 }
@@ -139,4 +142,84 @@ export function immediate<TArgs extends any[]>(callback: (...args: TArgs) => voi
       }
     },
   };
+}
+
+
+export function maskBuffer(buffer: Uint8Array, mask: number | Uint8Array): Uint8Array {
+  const input = new Uint8Array(buffer);
+  const output = new Uint8Array(input.length);
+
+  const isArrayMask = mask instanceof Uint8Array;
+  const maskLength = isArrayMask ? mask.length : 1;
+
+  for(let i = 0; i < input.length; i++) {
+    const maskByte = isArrayMask ? mask[i % maskLength] : mask;
+    output[i] = input[i] ^ maskByte;
+  }
+
+  return output;
+}
+
+
+export function concatBuffers(...u8: Uint8Array[]): Uint8Array {
+  const len = u8.reduce((acc, curr) => {
+    acc += curr.length;
+    return acc;
+  }, 0);
+
+  const target = new Uint8Array(len);
+  let offset: number = 0;
+
+  for(let i = 0; i < u8.length; i++) {
+    target.set(u8[i], offset);
+    offset += u8[i].length;
+  }
+
+  return target;
+}
+
+
+
+export function timingSafeEqual(a: Uint8Array | string, b: Uint8Array | string): boolean {
+  const toBytes = (val: Uint8Array | string) => val instanceof Uint8Array ? val : getEncoder().encode(val);
+  const buffers = [ toBytes(a), toBytes(b) ];
+
+  if(buffers[0].length !== buffers[1].length)
+    return false;
+
+  let c: number = 0;
+
+  for(let i = 0; i < buffers[0].length; i++) {
+    c |= buffers[0][i] ^ buffers[1][i];
+  }
+
+  return c === 0;
+}
+
+
+let te: TextEncoder | null = null;
+
+function getEncoder(r?: boolean): TextEncoder {
+  if(!te) {
+    te = new TextEncoder();
+  }
+
+  if(r) {
+    te = new TextEncoder();
+  }
+
+  return te;
+}
+
+
+const hasPerformanceNow = (
+  typeof globalThis === "object" &&
+  typeof globalThis.performance !== "undefined" &&
+  typeof globalThis.performance.now === "function"
+);
+
+export function timestamp(highPrecision?: boolean): number {
+  return highPrecision !== false && hasPerformanceNow ?
+    globalThis.performance.now() :
+    Date.now();
 }

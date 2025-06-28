@@ -146,6 +146,13 @@ export type BufferLike =
   | number[];
 
 
+export type GenericFunction = (...args: any[]) => unknown;
+export type EventCallback<TArgs extends unknown[] = []> = (...args: TArgs) => unknown;
+
+export type Dict<T> = {
+  [key: string]: T;
+};
+
 export type Mutable<T> = {
   -readonly [K in keyof T]: T[K];
 }

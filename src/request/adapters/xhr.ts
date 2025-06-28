@@ -1,6 +1,6 @@
 import FetchAdapter from "./fetch";
 import { NetworkRequestAdapter } from "./_defs";
-import { isAsyncIterable, isIterable, isPlainObject } from "../../@internals/util";
+import { concatBuffers, isAsyncIterable, isIterable, isPlainObject } from "../../@internals/util";
 
 
 class XMLHttpRequestAdapter extends NetworkRequestAdapter {
@@ -9,6 +9,7 @@ class XMLHttpRequestAdapter extends NetworkRequestAdapter {
     _options?: Omit<RequestInit, "headers"> & {
       timeout?: number;
       auth?: [string, string];
+      onProgress?: (event: ProgressEvent<XMLHttpRequestEventTarget>) => unknown;
       headers?: Record<string, string | string[]> | Headers;
     } // eslint-disable-line comma-dangle
   ): NetworkRequestAdapter {
@@ -31,7 +32,7 @@ class XMLHttpRequestAdapter extends NetworkRequestAdapter {
     if(typeof globalThis.XMLHttpRequest === "undefined") {
       throw new Error("Unable to use XMLHttpRequest in current environment");
     }
-
+    
     super(_url, _options);
     this.#xhr = new globalThis.XMLHttpRequest();
     
@@ -61,43 +62,19 @@ class XMLHttpRequestAdapter extends NetworkRequestAdapter {
       let body = null;
 
       if(this._options?.body) {
-        if(isAsyncIterable<Uint8Array>(this._options.body)) {
-          let len: number = 0;
+        if(isIterable(this._options.body) || isAsyncIterable(this._options.body)) {
           const chunks: Uint8Array[] = [];
 
-          for await(const chunk of this._options.body) {
+          for await (const chunk of (this._options.body as unknown as IterableIterator<Uint8Array>)) {
             chunks.push(chunk);
-            len += chunk.length;
           }
 
-          body = new Uint8Array(len);
-          let offset: number = 0;
-
-          for(let i = 0; i < chunks.length; i++) {
-            body.set(chunks[i], offset);
-            offset += chunks[i].length;
-          }
-        } else if(isIterable<Uint8Array>(this._options.body)) {
-          let len: number = 0;
-          const chunks: Uint8Array[] = [];
-
-          for(const chunk of this._options.body) {
-            chunks.push(chunk);
-            len += chunk.length;
-          }
-
-          body = new Uint8Array(len);
-          let offset: number = 0;
-
-          for(let i = 0; i < chunks.length; i++) {
-            body.set(chunks[i], offset);
-            offset += chunks[i].length;
-          }
+          body = concatBuffers(...chunks);
         } else {
           body = this._options.body as XMLHttpRequestBodyInit;
         }
       }
-
+      
       return await new Promise((resolve, reject) => {
         if(this.#xhr.readyState > XMLHttpRequest.OPENED) {
           reject();
@@ -150,6 +127,10 @@ class XMLHttpRequestAdapter extends NetworkRequestAdapter {
 
           resolve(res);
         };
+
+        if(this._options?.onProgress) {
+          this.#xhr.addEventListener("progress", this._options.onProgress);
+        }
 
         this.#xhr.send(body);
       });

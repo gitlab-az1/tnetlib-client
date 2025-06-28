@@ -1,3 +1,4 @@
+export * from "./transport";
 export * from "./defs";
 export * from "./form-data";
 export { default as InterceptorChain } from "./interceptor";

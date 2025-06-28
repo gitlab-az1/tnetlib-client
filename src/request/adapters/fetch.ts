@@ -61,14 +61,21 @@ class FetchAdapter extends NetworkRequestAdapter {
       ) ?
         this._options.timeout : null;
 
-      if(t != null) return await Promise.race([
-        $call(),
-        new Promise<Response>((_, reject) => {
-          setTimeout(() => {
-            reject(new Error(`Request timed out for '${this._url.toString()}' in ${t}ms`));
-          }, t);
-        }),
-      ]);
+      if(t != null) {
+        let tid: ReturnType<typeof setTimeout>;
+
+        return await Promise.race([
+          $call(),
+          new Promise<Response>((_, reject) => {
+            tid = setTimeout(() => {
+              reject(new Error(`Request timed out for '${this._url.toString()}' in ${t}ms`));
+            }, t);
+          }),
+        ])
+          .finally(() => {
+            clearTimeout(tid);
+          });
+      }
 
       return await $call();
     } finally {
