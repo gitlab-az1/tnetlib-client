@@ -1,0 +1,7 @@
+{
+  "name": "tnetlib-client",
+  "version": "0.1.2",
+  "main": "index.js",
+  "license": "AGPL-3.0-only",
+  "repository": "https://github.com/gitlab-az1/tnetlib-client.git"
+}

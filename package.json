@@ -1,0 +1,37 @@
+{
+  "name": "tnetlib-client",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "license": "AGPL-3.0-only",
+  "repository": "https://github.com/gitlab-az1/tnetlib-client.git",
+  "scripts": {
+    "build": "tsc --emitDeclarationOnly && babel src --extensions \".js,.ts\" --out-dir dist --copy-files --no-copy-ignored && node ./post-build.js",
+    "build:no-fix": "tsc --emitDeclarationOnly && babel src --extensions \".js,.ts\" --out-dir dist --copy-files --no-copy-ignored",
+    "test:watch": "clear && tsnd -r tsconfig-paths/register --transpile-only --respawn --ignore-watch node_modules src/test.ts",
+    "test": "clear && yarn build && clear && NODE_ENV=test node ./dist/test.js && rm -rf ./dist/",
+    "hot": "tsc --noEmit && yarn build && clear && node ./dist/index.js && rm -rf ./dist/",
+    "spec": "clear && tsc --noEmit && NODE_ENV=test jest --verbose --runInBand"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.27.2",
+    "@babel/core": "^7.27.1",
+    "@babel/generator": "^7.27.5",
+    "@babel/node": "^7.27.1",
+    "@babel/plugin-transform-class-properties": "^7.27.1",
+    "@babel/plugin-transform-private-methods": "^7.27.1",
+    "@babel/plugin-transform-typescript": "^7.27.1",
+    "@babel/preset-env": "^7.27.2",
+    "@babel/preset-typescript": "^7.27.1",
+    "@babel/traverse": "^7.27.7",
+    "@babel/types": "^7.27.7",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.15.21",
+    "@typescript-eslint/eslint-plugin": "7.8.0",
+    "@typescript-eslint/parser": "7.8.0",
+    "babel-plugin-module-resolver": "^5.0.2",
+    "eslint": "8.57.0",
+    "jest": "^29.7.0",
+    "node-runloop": "^0.1.1",
+    "typescript": "^5.8.3"
+  }
+}
